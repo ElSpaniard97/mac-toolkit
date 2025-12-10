@@ -1,0 +1,470 @@
+import SwiftUI
+import AppKit
+import AVFoundation
+
+struct TestDefinition: Identifiable, Hashable {
+    let id = UUID()
+    let name: String
+    let arg: String
+    let description: String
+}
+
+struct ContentView: View {
+
+    // ===============================
+    // MARK: - TEST DEFINITIONS
+    // ===============================
+    private let tests: [TestDefinition] = [
+        TestDefinition(
+            name: "CPU Stress Test",
+            arg: "cpu",
+            description: "Run a 60-second CPU load on all cores and check utilization."
+        ),
+        TestDefinition(
+            name: "Memory Stress Test",
+            arg: "memory",
+            description: "Allocate RAM and hold it for ~60 seconds while monitoring vm_stat."
+        ),
+        TestDefinition(
+            name: "Disk Stress Test",
+            arg: "disk",
+            description: "Write and read a temporary file to estimate disk performance."
+        ),
+        TestDefinition(
+            name: "Battery Stress Test",
+            arg: "battery",
+            description: "Apply CPU load on battery and compare percentage before and after."
+        ),
+        TestDefinition(
+            name: "Network Test",
+            arg: "network",
+            description: "Ping, traceroute, and network quality checks."
+        ),
+        TestDefinition(
+            name: "Audio Output Test",
+            arg: "audio",
+            description: "Play center, left, right, and both speaker tones."
+        ),
+        TestDefinition(
+            name: "Keyboard Test",
+            arg: "keyboard",
+            description: "Open KeyboardChecker.com to verify that all keys register."
+        ),
+        TestDefinition(
+            name: "Display Test",
+            arg: "display",
+            description: "Flash solid colors (green / blue / red) to verify panel activity."
+        ),
+        TestDefinition(
+            name: "Camera Test",
+            arg: "camera",
+            description: "Open Photo Booth or FaceTime to verify camera image."
+        )
+    ]
+
+    // ===============================
+    // MARK: - STATE
+    // ===============================
+    @State private var selectedTest: TestDefinition?
+    @State private var outputText: String = "Select a test on the left and click \"Run Test\"."
+    @State private var isRunning: Bool = false
+    @State private var showOutcomeSheet: Bool = false
+    @State private var outcomeMessage: String = ""
+
+    // Display overlay
+    @State private var showDisplayOverlay: Bool = false
+
+    // ===============================
+    // MARK: - AUDIO ENGINE
+    // ===============================
+    private let audioEngine = AVAudioEngine()
+    private let playerNode = AVAudioPlayerNode()
+
+    private func playTone(pan: Float = 0.0) {
+        let sampleRate: Double = 44100.0
+        let duration: Double = 0.25
+        let frequency: Double = 880.0
+
+        let frameCount = Int(sampleRate * duration)
+        var samples = [Float](repeating: 0, count: frameCount)
+
+        for i in 0..<frameCount {
+            let index = Double(i)
+            let angle = 2.0 * Double.pi * frequency * index / sampleRate
+            let sampleValue = sin(angle)
+            samples[i] = Float(sampleValue)
+        }
+
+        let format = audioEngine.outputNode.outputFormat(forBus: 0)
+
+        guard let buffer = AVAudioPCMBuffer(
+            pcmFormat: format,
+            frameCapacity: AVAudioFrameCount(frameCount)
+        ) else { return }
+
+        buffer.frameLength = AVAudioFrameCount(frameCount)
+
+        let channelCount = Int(format.channelCount)
+        for channel in 0..<channelCount {
+            let channelData = buffer.floatChannelData![channel]
+            for i in 0..<frameCount {
+                channelData[i] = samples[i]
+            }
+        }
+
+        playerNode.pan = pan   // -1 = left, 1 = right, 0 = center
+
+        if !audioEngine.isRunning {
+            do {
+                audioEngine.attach(playerNode)
+                audioEngine.connect(playerNode, to: audioEngine.outputNode, format: format)
+                try audioEngine.start()
+            } catch {
+                print("Audio engine failed: \(error)")
+                return
+            }
+        }
+
+        playerNode.scheduleBuffer(buffer, at: nil, options: [])
+        playerNode.play()
+    }
+
+    private func runAudioChannelTest() {
+        // 3 center beeps
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            self.playTone(pan: 0.0)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            self.playTone(pan: 0.0)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+            self.playTone(pan: 0.0)
+        }
+
+        // Left
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+            self.outputText += "\n\nLeft channel…"
+            self.playTone(pan: -1.0)
+        }
+
+        // Right
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+            self.outputText += "\nRight channel…"
+            self.playTone(pan: 1.0)
+        }
+
+        // Both
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
+            self.outputText += "\nBoth speakers…"
+            self.playTone(pan: 0.0)
+        }
+    }
+
+    // ===============================
+    // MARK: - VIEW
+    // ===============================
+    var body: some View {
+        ZStack {
+            NavigationView {
+                // LEFT SIDEBAR
+                List {
+                    Section("Tests") {
+                        ForEach(tests) { test in
+                            let isSelected = (selectedTest?.id == test.id)
+
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(test.name)
+                                        .font(.headline)
+                                    Text(test.description)
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                Spacer()
+                            }
+                            .padding(.vertical, 4)
+                            .padding(.horizontal, 6)
+                            .contentShape(Rectangle())
+                            .background(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(isSelected ? Color.accentColor.opacity(0.25) : Color.clear)
+                            )
+                            .onTapGesture {
+                                selectedTest = test
+                                outputText = "Ready to run \(test.name). Click \"Run Test\"."
+                            }
+                        }
+                    }
+                }
+                .listStyle(SidebarListStyle())
+                .frame(minWidth: 260)
+
+                // RIGHT PANEL
+                VStack(alignment: .leading, spacing: 16) {
+
+                    Text("Mac Toolkit")
+                        .font(.largeTitle)
+                        .bold()
+
+                    Text("Run hardware and system diagnostics from a friendly UI.")
+                        .foregroundColor(.secondary)
+
+                    Divider()
+
+                    if let test = selectedTest {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(test.name)
+                                .font(.title2)
+                                .bold()
+                            Text(test.description)
+                        }
+                    } else {
+                        Text("No test selected.")
+                            .font(.title2)
+                            .foregroundColor(.secondary)
+                    }
+
+                    // Run button
+                    HStack {
+                        Button {
+                            runSelectedTest()
+                        } label: {
+                            HStack {
+                                if isRunning {
+                                    ProgressView().scaleEffect(0.8)
+                                }
+                                Text(isRunning ? "Running…" : "Run Test")
+                                    .bold()
+                            }
+                        }
+                        .disabled(selectedTest == nil || isRunning)
+
+                        Spacer()
+                    }
+                    .padding(.top, 8)
+
+                    // Output box
+                    Text("Test Output")
+                        .font(.headline)
+
+                    ZStack(alignment: .topLeading) {
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color(NSColor.textBackgroundColor))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(Color.gray.opacity(0.3))
+                            )
+
+                        ScrollView {
+                            Text(outputText)
+                                .font(.system(.body, design: .monospaced))
+                                .padding(8)
+                                .frame(maxWidth: .infinity, alignment: .topLeading)
+                        }
+                        .padding(2)
+                    }
+
+                    Spacer()
+                }
+                .padding()
+            }
+            .frame(minWidth: 900, minHeight: 550)
+            .alert(isPresented: $showOutcomeSheet) {
+                Alert(
+                    title: Text("Test Outcome"),
+                    message: Text(outcomeMessage),
+                    dismissButton: .default(Text("OK"))
+                )
+            }
+            .onAppear {
+                if selectedTest == nil {
+                    selectedTest = tests.first
+                }
+            }
+
+            // Display overlay
+            if showDisplayOverlay {
+                DisplayTestOverlay {
+                    showDisplayOverlay = false
+                    outcomeMessage = "Display test completed."
+                    showOutcomeSheet = true
+                }
+                .zIndex(1)
+            }
+        }
+    }
+
+    // ===============================
+    // MARK: - TEST EXECUTION
+    // ===============================
+    private func runSelectedTest() {
+        guard let test = selectedTest else { return }
+
+        let confirm = NSAlert()
+        confirm.messageText = "Run \(test.name)?"
+        confirm.informativeText = test.description
+        confirm.alertStyle = .informational
+        confirm.addButton(withTitle: "Run")
+        confirm.addButton(withTitle: "Cancel")
+
+        if confirm.runModal() != .alertFirstButtonReturn {
+            return
+        }
+
+        // Display test handled in SwiftUI
+        if test.arg == "display" {
+            outputText = "Running display test…"
+            showDisplayOverlay = true
+            return
+        }
+
+        // Audio test handled in SwiftUI
+        if test.arg == "audio" {
+            outputText = "Running Audio Test...\n\n• Center beeps (x3)\n• Left channel\n• Right channel\n• Both speakers"
+            isRunning = false
+
+            runAudioChannelTest()
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6.5) {
+                outcomeMessage = askForOutcome(testName: test.name)
+                showOutcomeSheet = true
+            }
+            return
+        }
+
+        // All other tests via script
+        outputText = "Running \(test.name)…"
+        isRunning = true
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = runToolkitTest(arg: test.arg)
+
+            DispatchQueue.main.async {
+                isRunning = false
+                outputText = result.output
+
+                outcomeMessage = askForOutcome(testName: test.name)
+                showOutcomeSheet = true
+            }
+        }
+    }
+
+    private func runToolkitTest(arg: String) -> (output: String, success: Bool) {
+        guard let toolkitURL = Bundle.main.url(
+            forResource: "mac_system_test_toolkit",
+            withExtension: "sh"
+        ) else {
+            return ("ERROR: toolkit not found in app bundle.", false)
+        }
+
+        let toolkitPath = toolkitURL.path
+        let fileManager = FileManager.default
+
+        if !fileManager.isExecutableFile(atPath: toolkitPath) {
+            let chmod = Process()
+            chmod.executableURL = URL(fileURLWithPath: "/bin/chmod")
+            chmod.arguments = ["+x", toolkitPath]
+            try? chmod.run()
+            chmod.waitUntilExit()
+        }
+
+        let process = Process()
+        let pipe = Pipe()
+
+        process.standardOutput = pipe
+        process.standardError = pipe
+
+        var env = ProcessInfo.processInfo.environment
+        env["MODE"] = "gui"
+        process.environment = env
+
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+
+        let quotedPath = "\"\(toolkitPath)\""
+        process.arguments = ["-lc", "MODE=gui \(quotedPath) \(arg)"]
+
+        do {
+            try process.run()
+        } catch {
+            return ("ERROR: Failed to start process.\n\(error.localizedDescription)", false)
+        }
+
+        process.waitUntilExit()
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let output = String(data: data, encoding: .utf8) ?? "(No output)"
+
+        return (output, process.terminationStatus == 0)
+    }
+
+    private func askForOutcome(testName: String) -> String {
+        let alert = NSAlert()
+        alert.messageText = "How did the test go?"
+        alert.informativeText = "Test: \(testName)"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Pass")
+        alert.addButton(withTitle: "Needs Attention")
+        alert.addButton(withTitle: "Cancel")
+
+        let response = alert.runModal()
+        switch response {
+        case .alertFirstButtonReturn:
+            return "\(testName) marked as PASSED."
+        case .alertSecondButtonReturn:
+            return "\(testName) marked as NEEDS ATTENTION."
+        default:
+            return "Outcome not recorded."
+        }
+    }
+}
+
+// ============================================
+// MARK: - DISPLAY TEST OVERLAY
+// ============================================
+struct DisplayTestOverlay: View {
+    let onFinished: () -> Void
+    @State private var step: Int = 0
+
+    private let colors: [Color] = [.green, .blue, .red]
+    private let labels: [String] = ["GREEN", "BLUE", "RED"]
+
+    var body: some View {
+        ZStack {
+            colors[step].ignoresSafeArea()
+
+            VStack(spacing: 24) {
+                Text("Display Test")
+                    .font(.largeTitle)
+                    .bold()
+                    .foregroundColor(.white)
+
+                Text("Screen should currently show \(labels[step]).")
+                    .font(.title2)
+                    .foregroundColor(.white)
+
+                Spacer()
+
+                Button(action: next) {
+                    Text(step < 2 ? "Next Color" : "Finish Test")
+                        .bold()
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 12)
+                        .background(Color.black.opacity(0.6))
+                        .foregroundColor(.white)
+                        .cornerRadius(10)
+                }
+                .padding(.bottom, 40)
+            }
+            .padding(.top, 80)
+        }
+    }
+
+    private func next() {
+        if step < 2 {
+            step += 1
+        } else {
+            onFinished()
+        }
+    }
+}
+
