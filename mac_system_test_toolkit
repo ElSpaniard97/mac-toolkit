@@ -1,0 +1,638 @@
+#!/bin/bash
+#
+# mac_system_test_toolkit.sh
+# Terminal toolkit to test macOS system components.
+# Non-destructive and safe for technicians.
+
+# MODE: cli (default) or gui (set by GUI app)
+MODE="${MODE:-cli}"
+
+# ---------- Helpers ----------
+
+pause() {
+    # Skip pause in GUI mode
+    if [[ "$MODE" == "gui" ]]; then
+        return
+    fi
+    echo
+    read -rp "Press Enter to return to the main menu..." _
+}
+
+header() {
+    clear
+    echo "================================================="
+    echo "        macOS System Component Test Toolkit      "
+    echo "================================================="
+    echo
+}
+
+require_cmd() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        echo "[$2] command '$1' not found on this system. Skipping."
+        return 1
+    fi
+    return 0
+}
+
+confirm_start() {
+    local msg="$1"
+    if [[ "$MODE" == "gui" ]]; then
+        # In GUI mode: always continue
+        return 0
+    fi
+    echo
+    read -rp "$msg" ans
+    [[ "$ans" == "yes" ]]
+}
+
+# ---------- 1) CPU STRESS TEST (LONGER + BASIC INSIGHT) ----------
+
+cpu_test() {
+    header
+    echo "[1] CPU Stress Test"
+    echo "-------------------"
+    echo "This will:"
+    echo "  • Start a CPU stress load (all cores) using 'yes'"
+    echo "  • Run for ~60 seconds"
+    echo "  • Show CPU usage and give a basic interpretation"
+    echo
+
+    if ! confirm_start "Type 'yes' to start the CPU stress test: "; then
+        pause
+        return
+    fi
+
+    cores=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
+    echo
+    echo "Detected CPU cores: $cores"
+    echo "Starting stress processes on all cores..."
+    echo
+
+    pids=()
+    for i in $(seq 1 "$cores"); do
+        yes > /dev/null &
+        pids+=($!)
+    done
+
+    if [[ "$MODE" == "cli" ]]; then
+        echo "Running stress test for about 60 seconds..."
+        echo "Taking 6 snapshots (every ~10 seconds)..."
+        echo
+
+        for i in {1..6}; do
+            echo "----- CPU Snapshot $i/6 -----"
+            top -l 1 -stats pid,command,cpu,time -o cpu | head -n 10
+            echo
+            sleep 10
+        done
+    else
+        echo "Running CPU stress for ~60 seconds..."
+        sleep 60
+    fi
+
+    echo "Gathering final CPU usage..."
+    cpu_line=$(top -l 1 | grep "CPU usage")
+    echo
+    echo "Final CPU usage line:"
+    echo "  $cpu_line"
+    echo
+
+    # Example: CPU usage: 93.68% user,  6.32% sys,  0.00% idle
+    user_pct=$(echo "$cpu_line" | awk -F'[:,%]' '{gsub(/ /,""); print $2}')
+    sys_pct=$(echo "$cpu_line" | awk -F'[:,%]' '{gsub(/ /,""); print $4}')
+    idle_pct=$(echo "$cpu_line" | awk -F'[:,%]' '{gsub(/ /,""); print $6}')
+
+    user_pct=$(echo "$user_pct" | tr -d ' ')
+    sys_pct=$(echo "$sys_pct" | tr -d ' ')
+    idle_pct=$(echo "$idle_pct" | tr -d ' ')
+
+    idle_int=${idle_pct%.*}
+
+    echo "Interpreted CPU usage (approx):"
+    echo "  User: ${user_pct}%"
+    echo "  Sys : ${sys_pct}%"
+    echo "  Idle: ${idle_pct}%"
+    echo
+
+    echo "Stopping stress processes..."
+    for p in "${pids[@]}"; do
+        kill "$p" 2>/dev/null
+    done
+    echo "Stress load stopped."
+    echo
+
+    if (( idle_int <= 20 )); then
+        echo "Result: CPU reached high utilization under stress (idle <= 20%)."
+        echo "        This is a GOOD sign. No obvious CPU performance issue detected."
+    else
+        echo "Result: CPU idle remained above 20% during stress."
+        echo "        This may still be OK (power management / background limits),"
+        echo "        but if you see performance issues, consider vendor diagnostics."
+    fi
+
+    pause
+}
+
+# ---------- 2) MEMORY STRESS TEST ----------
+
+memory_stress_test() {
+    header
+    echo "[2] Memory (RAM) Stress Test"
+    echo "----------------------------"
+    echo "This will:"
+    echo "  • Allocate a large chunk of RAM using Python"
+    echo "  • Hold it for ~60 seconds"
+    echo "  • Show vm_stat snapshots during the test (CLI mode)"
+    echo
+
+    py=$(command -v python3 || command -v python)
+    if [[ -z "$py" ]]; then
+        echo "Python is not available on this system. Cannot run memory stress test."
+        pause
+        return
+    fi
+
+    if ! confirm_start "Type 'yes' to start the memory stress test: "; then
+        pause
+        return
+    fi
+
+    echo
+    echo "Initial vm_stat snapshot:"
+    echo "-------------------------"
+    vm_stat | head -n 10
+    echo
+
+    echo "Starting memory stress process (Python)..."
+    $py - << 'EOF' &
+import os, time
+
+pages = os.sysconf('SC_PHYS_PAGES')
+page_size = os.sysconf('SC_PAGE_SIZE')
+total = pages * page_size  # bytes
+
+target = int(min(total * 0.30, 4 * 1024**3))  # up to 30% RAM, max 4GB
+
+block_size = 10 * 1024**2  # 10 MB blocks
+blocks = []
+allocated = 0
+
+while allocated < target:
+    blocks.append(bytearray(block_size))
+    allocated += block_size
+
+time.sleep(60)
+EOF
+    stress_pid=$!
+
+    if [[ "$MODE" == "cli" ]]; then
+        echo "Running memory stress for ~60 seconds with vm_stat snapshots..."
+        echo
+
+        for i in {1..6}; do
+            echo "----- Memory Snapshot $i/6 -----"
+            vm_stat | head -n 10
+            echo
+            sleep 10
+        done
+    else
+        echo "Running memory stress for ~60 seconds..."
+        sleep 60
+    fi
+
+    echo "Stopping memory stress process (if still running)..."
+    if kill -0 "$stress_pid" 2>/dev/null; then
+        kill "$stress_pid" 2>/dev/null
+    fi
+    echo "Memory stress load stopped."
+    echo
+
+    echo "Final vm_stat snapshot:"
+    echo "-----------------------"
+    vm_stat | head -n 10
+    echo
+
+    echo "Result: Test completed without the system killing the process."
+    echo "        If the Mac stayed reasonably responsive, RAM behavior"
+    echo "        appears OK for this basic stress test."
+    pause
+}
+
+# ---------- 3) DISK STRESS TEST ----------
+
+disk_stress_test() {
+    header
+    echo "[3] Disk Stress Test"
+    echo "--------------------"
+    echo "This will:"
+    echo "  • Write a temporary 512 MB file to /tmp"
+    echo "  • Read it back to /dev/null"
+    echo "  • Measure rough read/write speed and give basic insight"
+    echo
+    echo "No existing data is touched. Temporary file is deleted afterward."
+    echo
+
+    if ! confirm_start "Type 'yes' to start the disk stress test: "; then
+        pause
+        return
+    fi
+
+    tmpfile=$(mktemp /tmp/disk_stress_test.XXXXXX)
+    size_mb=512
+
+    echo
+    echo "Writing ${size_mb}MB to $tmpfile ..."
+    write_out=$(dd if=/dev/zero of="$tmpfile" bs=1m count=$size_mb conv=sync 2>&1)
+
+    echo
+    echo "Write dd output (tail):"
+    echo "$write_out" | tail -n 3
+    echo
+
+    write_line=$(echo "$write_out" | grep "bytes transferred")
+    write_bytes=$(echo "$write_line" | awk '{print $1}')
+    write_sec_field=$(echo "$write_line" | awk '{print $5}')
+    write_secs_dd=${write_sec_field%.*}
+    (( write_secs_dd == 0 )) && write_secs_dd=1
+    write_mb_s=$(( write_bytes / 1024 / 1024 / write_secs_dd ))
+
+    echo "Approx write speed: ${write_mb_s} MB/s"
+    echo
+
+    echo "Reading ${size_mb}MB from $tmpfile ..."
+    read_out=$(dd if="$tmpfile" of=/dev/null bs=1m 2>&1)
+
+    echo
+    echo "Read dd output (tail):"
+    echo "$read_out" | tail -n 3
+    echo
+
+    read_line=$(echo "$read_out" | grep "bytes transferred")
+    read_bytes=$(echo "$read_line" | awk '{print $1}')
+    read_sec_field=$(echo "$read_line" | awk '{print $5}')
+    read_secs_dd=${read_sec_field%.*}
+    (( read_secs_dd == 0 )) && read_secs_dd=1
+    read_mb_s=$(( read_bytes / 1024 / 1024 / read_secs_dd ))
+
+    echo "Approx read speed: ${read_mb_s} MB/s"
+    echo
+
+    echo "Cleaning up temporary file..."
+    rm -f "$tmpfile"
+    echo "Temp file removed."
+    echo
+
+    echo "Result interpretation (very rough):"
+    if (( write_mb_s >= 200 && read_mb_s >= 200 )); then
+        echo "  • Speeds look GOOD for an SSD on a modern Mac."
+    elif (( write_mb_s >= 80 && read_mb_s >= 80 )); then
+        echo "  • Speeds are OK / usable, might be HDD or a slower SSD."
+    else
+        echo "  • Speeds appear SLOW. If this is an internal SSD, consider:"
+        echo "      - Checking disk health via Disk Utility / vendor tools"
+        echo "      - Ensuring the Mac is not heavily loaded during the test"
+    fi
+
+    pause
+}
+
+# ---------- 4) BATTERY STRESS TEST ----------
+
+battery_stress_test() {
+    header
+    echo "[4] Battery Stress Test"
+    echo "-----------------------"
+    echo "This will:"
+    echo "  • Run a CPU load for ~60 seconds"
+    echo "  • Capture battery info snapshots"
+    echo "  • Compare battery % before vs after and give basic insight"
+    echo
+    echo "Note: For meaningful results, run this test on BATTERY power."
+    echo
+
+    if ! confirm_start "Type 'yes' to start the battery stress test: "; then
+        pause
+        return
+    fi
+
+    echo
+    echo "Initial battery info:"
+    echo "---------------------"
+    initial_batt=$(pmset -g batt | head -n 2)
+    echo "$initial_batt"
+    initial_pct=$(echo "$initial_batt" | grep -Eo '[0-9]+%' | head -n 1 | tr -d '%')
+    echo
+
+    cores=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
+    echo "Starting CPU load on $cores cores to stress battery..."
+    echo
+
+    pids=()
+    for i in $(seq 1 "$cores"); do
+        yes > /dev/null &
+        pids+=($!)
+    done
+
+    if [[ "$MODE" == "cli" ]]; then
+        echo "Running battery snapshots for ~60 seconds..."
+        echo
+
+        for i in {1..6}; do
+            echo "----- Battery Snapshot $i/6 -----"
+            pmset -g batt | head -n 2
+            echo
+            sleep 10
+        done
+    else
+        echo "Running CPU load for ~60 seconds..."
+        sleep 60
+    fi
+
+    echo "Stopping CPU load..."
+    for p in "${pids[@]}"; do
+        kill "$p" 2>/dev/null
+    done
+    echo "CPU load stopped."
+    echo
+
+    echo "Final battery info:"
+    echo "-------------------"
+    final_batt=$(pmset -g batt | head -n 2)
+    echo "$final_batt"
+    final_pct=$(echo "$final_batt" | grep -Eo '[0-9]+%' | head -n 1 | tr -d '%')
+    echo
+
+    if [[ -n "$initial_pct" && -n "$final_pct" ]]; then
+        drop=$(( initial_pct - final_pct ))
+        echo "Battery percentage change during test: ${initial_pct}% → ${final_pct}% (Δ=${drop}%)"
+        echo
+
+        if echo "$initial_batt" | grep -qi "AC Power"; then
+            echo "Result: On AC power (charging) – drain can’t be measured reliably."
+        else
+            if (( drop <= 1 )); then
+                echo "Result: Little to no percentage drop in this short test."
+                echo "        Battery behavior appears OK for this quick check."
+            else
+                echo "Result: Battery dropped by ${drop}% in ~60 seconds."
+                echo "        This may indicate faster-than-expected drain."
+            fi
+        fi
+    else
+        echo "Could not parse battery percentage. Check pmset output manually."
+    fi
+
+    pause
+}
+
+# ---------- 5) NETWORK TEST ----------
+
+network_test() {
+    header
+    echo "[5] Network Test"
+    echo "----------------"
+    echo "Ping Google DNS (8.8.8.8):"
+    ping -c 4 8.8.8.8 || echo "Ping failed."
+    echo
+    echo "Ping apple.com:"
+    ping -c 4 apple.com || echo "DNS connectivity failed."
+    echo
+    if command -v traceroute >/dev/null 2>&1; then
+        echo "Traceroute to apple.com:"
+        traceroute apple.com
+        echo
+    fi
+    if command -v networkQuality >/dev/null 2>&1; then
+        echo "Network quality:"
+        networkQuality
+    fi
+    pause
+}
+
+# ---------- 6) AUDIO TEST ----------
+
+audio_test() {
+    header
+    echo "[6] Audio Output Test"
+    echo "----------------------"
+    echo "Audio devices (system_profiler SPAudioDataType):"
+    echo "-----------------------------------------------"
+    system_profiler SPAudioDataType
+    echo
+    sound="/System/Library/Sounds/Glass.aiff"
+    if [[ -f "$sound" ]]; then
+        echo "Playing audio test sound..."
+        afplay "$sound"
+    else
+        echo "Test sound not found at $sound."
+    fi
+    pause
+}
+
+# ---------- 7) KEYBOARD TEST (OPENS WEBSITE) ----------
+
+keyboard_test() {
+    header
+    echo "[7] Keyboard Test"
+    echo "-----------------"
+    echo "This test will open KeyboardChecker.com in your default browser."
+    echo "Use it to press every key and confirm they register correctly."
+    echo
+
+    if ! confirm_start "Type 'yes' to open the keyboard tester: "; then
+        pause
+        return
+    fi
+
+    echo
+    echo "Opening: https://keyboardchecker.com/"
+    open "https://keyboardchecker.com/"
+
+    echo
+    if [[ "$MODE" == "cli" ]]; then
+        echo "Use the website to test each key."
+        echo "When finished, return to this Terminal window."
+        echo
+        read -rp "Press Enter when you have finished testing..." _
+        echo
+        read -rp "Did the keyboard work correctly? (yes/no): " result
+
+        if [[ "$result" == "yes" ]]; then
+            echo "Keyboard test PASSED."
+        else
+            echo "Keyboard test FAILED."
+        fi
+    else
+        echo "Keyboard test site opened in browser. Verify keys visually."
+        echo "Result must be judged by the technician."
+    fi
+
+    pause
+}
+
+# ---------- 8) DISPLAY TEST (still uses Terminal visuals) ----------
+
+display_test() {
+    header
+    echo "[8] Display Test"
+    echo "----------------"
+    echo "This will flash the display in this order:"
+    echo "  • GREEN"
+    echo "  • BLUE"
+    echo "  • RED"
+    echo
+    echo "Tip: Put Terminal in full-screen for best effect (CLI use)."
+    echo
+
+    if ! confirm_start "Type 'yes' to start the display test: "; then
+        pause
+        return
+    fi
+
+    flash_color() {
+        local name="$1"
+        local code="$2"
+        local rows cols
+        rows=$(tput lines 2>/dev/null || echo 24)
+        cols=$(tput cols 2>/dev/null || echo 80)
+
+        clear
+        printf '\033[%sm' "$code"
+        for ((i=1; i<=rows; i++)); do
+            printf '%*s\n' "$cols" ''
+        done
+        printf '\033[0m'
+        echo
+        echo "$name screen displayed."
+    }
+
+    flash_color "GREEN" "42"
+    if [[ "$MODE" == "cli" ]]; then
+        read -rp "Press Enter for BLUE..." _
+    else
+        sleep 2
+    fi
+
+    flash_color "BLUE" "44"
+    if [[ "$MODE" == "cli" ]]; then
+        read -rp "Press Enter for RED..." _
+    else
+        sleep 2
+    fi
+
+    flash_color "RED" "41"
+    if [[ "$MODE" == "cli" ]]; then
+        read -rp "Press Enter to finish..." _
+    else
+        sleep 2
+    fi
+
+    clear
+    echo "Display test complete (visual only)."
+    pause
+}
+
+# ---------- 9) CAMERA TEST ----------
+
+camera_test() {
+    header
+    echo "[9] Camera Test"
+    echo "---------------"
+    echo "This will open a camera app so you can verify:"
+    echo "  • The camera turns on"
+    echo "  • Live preview is working"
+    echo
+    echo "Primary: Photo Booth"
+    echo "Fallback: FaceTime"
+    echo
+
+    if ! confirm_start "Type 'yes' to begin: "; then
+        pause
+        return
+    fi
+
+    if open -a "Photo Booth" 2>/dev/null; then
+        echo "Photo Booth opened."
+    else
+        echo "Photo Booth not found. Trying FaceTime..."
+        if open -a "FaceTime" 2>/dev/null; then
+            echo "FaceTime opened."
+        else
+            echo "Failed to open camera apps."
+            pause
+            return
+        fi
+    fi
+
+    if [[ "$MODE" == "cli" ]]; then
+        echo
+        read -rp "Press Enter after verifying the camera..." _
+    else
+        echo "Camera app opened. Verify image manually."
+    fi
+
+    pause
+}
+
+# ---------- ARG DISPATCH (for GUI calls) ----------
+
+run_by_arg() {
+    case "$1" in
+        cpu|1)        cpu_test ;;
+        mem|memory|2) memory_stress_test ;;
+        disk|3)       disk_stress_test ;;
+        batt|battery|4) battery_stress_test ;;
+        net|network|5) network_test ;;
+        audio|6)      audio_test ;;
+        kb|keyboard|7) keyboard_test ;;
+        disp|display|8) display_test ;;  # still requires Terminal visual
+        cam|camera|9) camera_test ;;
+        *)            main_menu ;;
+    esac
+}
+
+# ---------- MAIN MENU (CLI) ----------
+
+main_menu() {
+    while true; do
+        header
+        echo "Select a test:"
+        echo "  1) CPU Stress Test"
+        echo "  2) Memory Stress Test"
+        echo "  3) Disk Stress Test"
+        echo "  4) Battery Stress Test"
+        echo "  5) Network Test"
+        echo "  6) Audio Output Test"
+        echo "  7) Keyboard Test"
+        echo "  8) Display Test"
+        echo "  9) Camera Test"
+        echo
+        echo "  q) Quit"
+        echo
+        read -rp "Enter choice: " choice
+
+        case "$choice" in
+            1) cpu_test ;;
+            2) memory_stress_test ;;
+            3) disk_stress_test ;;
+            4) battery_stress_test ;;
+            5) network_test ;;
+            6) audio_test ;;
+            7) keyboard_test ;;
+            8) display_test ;;
+            9) camera_test ;;
+            q|Q) echo "Goodbye."; exit 0 ;;
+            *) echo "Invalid choice."; sleep 1 ;;
+        esac
+    done
+}
+
+# ---------- ENTRYPOINT ----------
+
+if [[ $# -ge 1 ]]; then
+    run_by_arg "$1"
+    exit 0
+else
+    main_menu
+fi
+
